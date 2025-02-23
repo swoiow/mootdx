@@ -447,6 +447,8 @@ class StdQuotes(BaseQuotes):
             temp.append(self.client.to_df(data))
 
         data = pd.concat(temp)
+        if data.empty:
+            return pd.DataFrame()  # 当没有数据时，返回空df
         data = data.assign(date=data['datetime'].apply(lambda x: str(x)[0:10])).assign(code=str(code))
         data = data.set_index('date', drop=False, inplace=False)
         data = data.drop(['year', 'month', 'day', 'hour', 'minute', 'datetime'], axis=1)
