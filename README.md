@@ -1,4 +1,4 @@
-通达信数据读取接口
+通达信数据读取接口 (fork)
 ==================
 
 [![image](https://badge.fury.io/py/mootdx.svg)](http://badge.fury.io/py/mootdx)
@@ -15,6 +15,17 @@
 -   国内镜像: <https://gitee.com/ibopo/mootdx>
 -   项目仓库: <https://github.com/mootdx/mootdx>
 -   问题交流: <https://github.com/mootdx/mootdx/issues>
+
+
+# TODO
+
+- [x] 修正常见的问题
+  - [x] 当没有数据时，返回空DataFrame
+- [ ] 修复假日取数问题
+- [ ] async mode
+- [ ] 弃用旧版的pandas，主要处理“fill弃用参数”的问题，或者做hot patch
+- [ ] https://github.com/mootdx/mootdx/pull/110
+
 
 版本更新(倒序)
 --------------
