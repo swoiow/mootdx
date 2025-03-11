@@ -247,7 +247,7 @@ def get_config_path(config='config.json'):
     filename = Path.home() / '.mootdx' / config
     pathname = Path(filename).parent
 
-    Path(pathname).exists() or Path(pathname).mkdir(parents=True)
+    Path(pathname).exists() or Path(pathname).mkdir(parents=True, exist_ok=True)
     # Path(filename).exists() or Path(filename).write_text('None')
 
     return str(filename)
