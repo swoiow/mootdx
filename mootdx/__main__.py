@@ -3,10 +3,12 @@ import os
 import warnings
 from pathlib import Path
 
+import pandas as pd
+
 from mootdx import __version__
 from mootdx.logger import logger
-from mootdx.utils import get_config_path
-from mootdx.utils import to_file
+from mootdx.utils import get_config_path, to_file
+
 
 try:
     import click
@@ -16,6 +18,9 @@ except (ImportError, ModuleNotFoundError):
     warnings.warn('!!! 缺少命令行依赖, 请使用次命令进行安装: pip install "mootdx[cli]"', DeprecationWarning)
     logging.warning('!!! 缺少命令行依赖, 请使用次命令进行安装: pip install "mootdx[cli]"')
     exit(-1)
+
+if not hasattr(pd.DataFrame, "fillna"):
+    pd.DataFrame.fillna = pd.DataFrame.fill_na  # 让 fill_na 兼容旧版 fillna
 
 
 @click.group()
