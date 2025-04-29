@@ -1,29 +1,21 @@
 import math
 from datetime import datetime
+from typing import Union
 
 import pandas
 import pandas as pd
 from tdxpy.exceptions import ValidationException
 from tdxpy.exhq import TdxExHq_API
 from tdxpy.hq import TdxHq_API
-from tenacity import retry
-from tenacity import retry_if_exception_type
-from tenacity import retry_if_result
-from tenacity import stop_after_attempt
-from tenacity import wait_random
+from tenacity import retry, retry_if_exception_type, retry_if_result, stop_after_attempt, wait_random
 from tqdm import tqdm
 
 from mootdx import config
-from mootdx.consts import MARKET_SH
-from mootdx.consts import MARKET_SZ
-from mootdx.consts import return_last_value
+from mootdx.consts import MARKET_SH, MARKET_SZ, return_last_value
 from mootdx.exceptions import MootdxValidationException
 from mootdx.logger import logger
 from mootdx.server import check_server
-from mootdx.utils import get_frequency
-from mootdx.utils import get_stock_market
-from mootdx.utils import get_stock_markets
-from mootdx.utils import to_data
+from mootdx.utils import get_frequency, get_stock_market, get_stock_markets, to_data
 
 
 class Quotes(object):
@@ -57,6 +49,12 @@ def valid_server(server):
             raise ValueError('Server 格式错误. 例如: server = ("127.0.0.1", 2272)')
 
     return None
+
+
+def count_weekdays(start: pd.Timestamp, end: pd.Timestamp) -> int:
+    # 左闭右开：[start, end)
+    all_days = pd.date_range(start=start, end=end - pd.Timedelta(days=1), freq="D")
+    return (all_days.weekday < 5).sum()
 
 
 class BaseQuotes(object):
@@ -426,34 +424,45 @@ class StdQuotes(BaseQuotes):
     def ohlc(self, **kwargs):
         return self.k(**kwargs)
 
-    def get_k_data(self, code, start_date, end_date):
-        # 开始时间离现在有几天
-        first = (pd.to_datetime(end_date) - pd.to_datetime(datetime.now().date())).days
-        first = (abs(first), 0)[first >= 0]
+    def get_k_data(self, code: str, start_date: Union[str, datetime], end_date: Union[str, datetime]) -> pd.DataFrame:
+        start_date = pd.to_datetime(start_date)
+        end_date = pd.to_datetime(end_date)
+        if end_date <= start_date:
+            return pd.DataFrame()
 
-        # 结束时间离现在有几天
-        last = (pd.to_datetime(start_date) - pd.to_datetime(datetime.now().date())).days
-        last = (abs(last), 0)[last >= 0]
-
-        # 去除节假日
-        first -= int(first / 2.8)  # 非交易日大概是全年的1/3
-        last -= int(last / 3.5)  # 非交易日大概是全年的1/3
-
-        temp = []
+        today = pd.to_datetime(datetime.now().date())
         market = get_stock_market(code)
 
-        for i in range(math.ceil((last - first) / 800)):
-            data = self.client.get_security_bars(9, market, code, (first + i * 800), 800)
-            temp.append(self.client.to_df(data))
+        workday_count = count_weekdays(start_date, end_date)
+        if workday_count <= 0:
+            return pd.DataFrame()
 
-        data = pd.concat(temp)
-        if data.empty:
-            return pd.DataFrame()  # 当没有数据时，返回空df
-        data = data.assign(date=data['datetime'].apply(lambda x: str(x)[0:10])).assign(code=str(code))
-        data = data.set_index('date', drop=False, inplace=False)
-        data = data.drop(['year', 'month', 'day', 'hour', 'minute', 'datetime'], axis=1)
-        data = data.loc[(data.date >= start_date) & (data.date < end_date)]
-        data = data.sort_index()
+        offset_end = max((end_date - today).days, 0)
+
+        chunk_size = 800
+        page_num = math.ceil(workday_count / chunk_size)
+
+        all_data = []
+        for i in range(page_num):
+            offset = offset_end + i * chunk_size
+            count = min(chunk_size, workday_count - i * chunk_size)
+            bars = self.client.get_security_bars(9, market, code, offset, count)
+            df = self.client.to_df(bars)
+            if not df.empty:
+                all_data.append(df)
+
+        if not all_data:
+            return pd.DataFrame()
+
+        # 数据整理与过滤
+        data = pd.concat(all_data, ignore_index=True)
+        # 格式清洗
+        data["date"] = pd.to_datetime(data["datetime"].astype(str).str[:10])
+        data["code"] = str(code)
+        data.drop(columns=["year", "month", "day", "hour", "minute", "datetime"], inplace=True)
+        data.set_index("date", inplace=True)
+        # 按时间过滤并返回
+        data = data.loc[(data.index >= start_date) & (data.index <= end_date)].sort_index()
 
         return data
 
