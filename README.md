@@ -1,10 +1,10 @@
 通达信数据读取接口 (fork)
 ==================
 
-[![image](https://badge.fury.io/py/mootdx.svg)](http://badge.fury.io/py/mootdx)
-[![image](https://img.shields.io/travis/bopo/mootdx.svg)](https://travis-ci.org/mootdx/mootdx)
-[![Documentation Status](https://readthedocs.org/projects/mootdx/badge/?version=latest)](https://mootdx.readthedocs.io/zh/latest/?badge=latest)
-[![Updates](https://pyup.io/repos/github/mootdx/mootdx/shield.svg)](https://pyup.io/repos/github/mootdx/mootdx/)
+[//]: # ([![image]&#40;https://badge.fury.io/py/mootdx.svg&#41;]&#40;http://badge.fury.io/py/mootdx&#41;)
+[//]: # ([![image]&#40;https://img.shields.io/travis/bopo/mootdx.svg&#41;]&#40;https://travis-ci.org/mootdx/mootdx&#41;)
+[//]: # ([![Documentation Status]&#40;https://readthedocs.org/projects/mootdx/badge/?version=latest&#41;]&#40;https://mootdx.readthedocs.io/zh/latest/?badge=latest&#41;)
+[//]: # ([![Updates]&#40;https://pyup.io/repos/github/mootdx/mootdx/shield.svg&#41;]&#40;https://pyup.io/repos/github/mootdx/mootdx/&#41;)
 
 如果喜欢本项目可以在右上角给颗⭐！你的支持是我最大的动力😎！
 
@@ -21,9 +21,10 @@
 
 - [x] 修正常见的问题
   - [x] 当没有数据时，返回空DataFrame
-- [ ] 修复假日取数问题
+- [x] 修复假日取数问题
 - [ ] async mode
-- [ ] 弃用旧版的pandas，主要处理“fill弃用参数”的问题，或者做hot patch
+- [x] 弃用旧版的pandas，主要处理“fill弃用参数”的问题，或者做hot patch
+  - monkey patch
 - [ ] https://github.com/mootdx/mootdx/pull/110
 
 
