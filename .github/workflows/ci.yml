@@ -1,0 +1,81 @@
+name: Build Wheels
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+    branches: [ develop ]
+
+concurrency:
+  group: build-wheel
+  cancel-in-progress: false
+
+jobs:
+  build-wheel:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+        python-version: [ "3.8", "3.9", "3.10", "3.11", "3.12", "3.13" ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ✅ Linux: Docker 构建
+      - name: Build wheel with Docker (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          docker build \
+            --build-arg PYTHON_VERSION=${{ matrix.python-version }} \
+            -t mootdx-builder-${{ matrix.python-version }} \
+            -f ${{ github.workspace }}/.github/docker/Dockerfile .
+
+          mkdir -p dist dist_temp
+
+          CONTAINER_ID=$(docker create mootdx-builder-${{ matrix.python-version }})
+          docker cp "$CONTAINER_ID:/app/dist/." dist_temp/ || echo "Nothing to copy"
+          docker rm "$CONTAINER_ID"
+
+          mv dist_temp/* dist/ 2>/dev/null || echo "No wheel files moved"
+          ls -alh dist/ || echo "dist directory not found"
+
+      # ✅ Windows: 原生构建
+      - name: Set up Python (Windows only)
+        if: matrix.os == 'windows-latest'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheel (Windows only)
+        if: matrix.os == 'windows-latest'
+        run: |
+          pip install --upgrade pip
+          pip install build
+          python -m build --wheel --outdir dist
+
+      # ✅ 重命名为标准格式（并导出文件路径供 artifact 使用）
+      - name: Rename wheel with version suffix
+        id: rename
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="dev-$(date +%Y%m%d-%H%M%S)"
+          fi
+
+          for f in dist/*.whl; do
+            [ -f "$f" ] || continue
+            NEWF="dist/mootdx-${VERSION}-py${{ matrix.python-version }}-${{ matrix.os }}.whl"
+            mv "$f" "$NEWF"
+            echo "renamed_whl=$NEWF" >> "$GITHUB_OUTPUT"
+          done
+
+      # ✅ 上传准确命名后的文件
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mootdx-${{ matrix.python-version }}-${{ matrix.os }}
+          path: ${{ steps.rename.outputs.renamed_whl }}
