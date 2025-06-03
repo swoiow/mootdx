@@ -108,6 +108,7 @@ jobs:
           tag_name: ${{ steps.extract_tag.outputs.tag }}
           name: ${{ steps.extract_tag.outputs.tag }}
           draft: false
+          prerelease: true
           make_latest: true
           append_body: false
           files: collected-artifacts/**/*.whl
