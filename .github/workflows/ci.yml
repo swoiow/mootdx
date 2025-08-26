@@ -58,30 +58,20 @@ jobs:
           pip install build
           python -m build --wheel --outdir dist
 
-      # ✅ 重命名为标准格式（并导出文件路径供 artifact 使用）
-      - name: Rename wheel with version suffix
-        id: rename
+      # ✅ 提取构建产物路径
+      - name: Identify built wheel
         shell: bash
+        id: find_whl
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          else
-            VERSION="dev-$(date +%Y%m%d-%H%M%S)"
-          fi
+          WHEEL_PATH=$(find dist -name "*.whl" | head -n 1)
+          echo "wheel_path=$WHEEL_PATH" >> "$GITHUB_OUTPUT"
 
-          for f in dist/*.whl; do
-            [ -f "$f" ] || continue
-            NEWF="dist/mootdx-${VERSION}-py${{ matrix.python-version }}-${{ matrix.os }}.whl"
-            mv "$f" "$NEWF"
-            echo "renamed_whl=$NEWF" >> "$GITHUB_OUTPUT"
-          done
-
-      # ✅ 上传准确命名后的文件
+      # ✅ 上传 artifact（无需重命名）
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
           name: mootdx-${{ matrix.python-version }}-${{ matrix.os }}
-          path: ${{ steps.rename.outputs.renamed_whl }}
+          path: ${{ steps.find_whl.outputs.wheel_path }}
 
   release:
     name: Create GitHub Release
@@ -95,26 +85,54 @@ jobs:
         with:
           path: collected-artifacts
 
-      - name: Extract tag name or fallback to branch
-        id: extract_tag
+      # ✅ 自动提取 tag（若为 tag 推送）或 fallback 到 branch + 时间戳
+      - name: Extract release name
+        id: release_name
+        shell: bash
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG_NAME="${GITHUB_REF#refs/tags/}"
+            PRERELEASE="false"
           else
-            TAG_NAME="develop"
+            BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+            TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}"
+            PRERELEASE="true"
           fi
-          echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "prerelease=$PRERELEASE" >> $GITHUB_OUTPUT
 
       - name: List collected artifacts
         run: ls -R collected-artifacts
 
+      # ✅ 去重：只保留“按文件名唯一”的一份 wheel 作为发布资产
+      - name: Collect unique wheels
+        id: collect_unique
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          # 逐个 wheel，按“同名只取第一个”策略去重
+          while IFS= read -r -d '' f; do
+            base="$(basename "$f")"
+            if [[ ! -e "release-assets/$base" ]]; then
+              cp -f "$f" "release-assets/$base"
+              echo "kept: $base"
+            else
+              echo "dup : $base (skipped)"
+            fi
+          done < <(find collected-artifacts -type f -name "*.whl" -print0)
+          echo "asset_dir=release-assets" >> "$GITHUB_OUTPUT"
+          ls -alh release-assets
+
+      # ✅ 创建（或更新）Release，并仅上传去重后的 wheel
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.extract_tag.outputs.tag }}
-          name: ${{ steps.extract_tag.outputs.tag }}
+          tag_name: ${{ steps.release_name.outputs.tag_name }}
+          name: ${{ steps.release_name.outputs.tag_name }}
           draft: false
-          prerelease: true
+          prerelease: ${{ steps.release_name.outputs.prerelease }}
           make_latest: true
           append_body: false
-          files: collected-artifacts/**/*.whl
+          files: ${{ steps.collect_unique.outputs.asset_dir }}/*.whl
