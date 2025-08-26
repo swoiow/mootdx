@@ -8,4 +8,4 @@ WORKDIR /app
 COPY . .
 
 # 构建 wheel 包（默认输出到 /app/dist）
-RUN python -m build --wheel
+RUN pip install -r requirements.txt && python setup.py bdist_wheel

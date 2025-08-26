@@ -19,7 +19,7 @@ jobs:
     strategy:
       matrix:
         os: [ ubuntu-latest, windows-latest ]
-        python-version: [ "3.8", "3.9", "3.10", "3.11", "3.12", "3.13" ]
+        python-version: [ "3.10", "3.11", "3.12", "3.13" ]
 
     steps:
       - name: Checkout repository
@@ -54,9 +54,9 @@ jobs:
       - name: Build wheel (Windows only)
         if: matrix.os == 'windows-latest'
         run: |
-          pip install --upgrade pip
-          pip install build
-          python -m build --wheel --outdir dist
+          pip install --upgrade pip build wheel setuptools
+          pip install -r requirements.txt
+          python setup.py bdist_wheel
 
       # ✅ 提取构建产物路径
       - name: Identify built wheel
@@ -76,7 +76,6 @@ jobs:
   release:
     name: Create GitHub Release
     needs: build-wheel
-    # if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
     steps:
@@ -85,25 +84,39 @@ jobs:
         with:
           path: collected-artifacts
 
-      # ✅ 自动提取 tag（若为 tag 推送）或 fallback 到 branch + 时间戳
-      - name: Extract release name
-        id: release_name
+      # 需要 git 历史来生成比较链接/生成 release notes
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ✅ 生成 tag/name + 预发布标记（tag→正式；branch→预发布）
+      - name: Compute release meta
+        id: meta
         shell: bash
         run: |
+          set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG_NAME="${GITHUB_REF#refs/tags/}"
             PRERELEASE="false"
+            MAKE_LATEST="true"
+            REF_KIND="tag"
           else
             BRANCH_NAME="${GITHUB_REF#refs/heads/}"
-            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}"
+            TS=$(date -u +%Y%m%d-%H%MZ)   # 使用UTC，避免时区混淆
+            SHORT_SHA=$(git rev-parse --short=8 HEAD)
+            TAG_NAME="${BRANCH_NAME}-${TS}-${SHORT_SHA}"
             PRERELEASE="true"
+            MAKE_LATEST="false"           # 预发布不设为latest，避免污染最新稳定版本
+            REF_KIND="branch"
           fi
-          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "prerelease=$PRERELEASE" >> $GITHUB_OUTPUT
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "make_latest=$MAKE_LATEST" >> "$GITHUB_OUTPUT"
+          echo "ref_kind=$REF_KIND" >> "$GITHUB_OUTPUT"
 
       - name: List collected artifacts
-        run: ls -R collected-artifacts
+        run: ls -R collected-artifacts || true
 
       # ✅ 去重：只保留“按文件名唯一”的一份 wheel 作为发布资产
       - name: Collect unique wheels
@@ -112,7 +125,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          # 逐个 wheel，按“同名只取第一个”策略去重
           while IFS= read -r -d '' f; do
             base="$(basename "$f")"
             if [[ ! -e "release-assets/$base" ]]; then
@@ -125,14 +137,62 @@ jobs:
           echo "asset_dir=release-assets" >> "$GITHUB_OUTPUT"
           ls -alh release-assets
 
-      # ✅ 创建（或更新）Release，并仅上传去重后的 wheel
+      # ✅ 生成 Release Body（自动列出 wheels、分支/commit、对比链接等）
+      - name: Build release body
+        id: body
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          SHA="${GITHUB_SHA}"
+          echo "## Artifacts" > RELEASE_BODY.md
+          if ls ${{ steps.collect_unique.outputs.asset_dir }}/*.whl >/dev/null 2>&1; then
+            echo "" >> RELEASE_BODY.md
+            for f in ${{ steps.collect_unique.outputs.asset_dir }}/*.whl; do
+              bn=$(basename "$f")
+              echo "- \`$bn\`" >> RELEASE_BODY.md
+            done
+          else
+            echo "" >> RELEASE_BODY.md
+            echo "_No wheels found._" >> RELEASE_BODY.md
+          fi
+
+          echo "" >> RELEASE_BODY.md
+          echo "## Source" >> RELEASE_BODY.md
+          if [[ "${{ steps.meta.outputs.ref_kind }}" == "tag" ]]; then
+            # 正式发布：让 action 生成官方 release notes（下个步骤开启 generate_release_notes）
+            LAST_TAG="$(git describe --tags --abbrev=0 --always || true)"
+            echo "- Ref: tag \`${{ steps.meta.outputs.tag_name }}\`" >> RELEASE_BODY.md
+            echo "- Commit: [$SHA](${REPO}/commit/${SHA})" >> RELEASE_BODY.md
+            if [[ -n "$LAST_TAG" && "$LAST_TAG" != "${{ steps.meta.outputs.tag_name }}" ]]; then
+              echo "- Compare: ${REPO}/compare/${LAST_TAG}...${{ steps.meta.outputs.tag_name }}" >> RELEASE_BODY.md
+            fi
+          else
+            # 预发布：带上分支名/commit/与最近tag的对比链接
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            LAST_TAG="$(git describe --tags --abbrev=0 --always || true)"
+            echo "- Ref: branch \`${BRANCH}\`" >> RELEASE_BODY.md
+            echo "- Commit: [$SHA](${REPO}/commit/${SHA})" >> RELEASE_BODY.md
+            if [[ -n "$LAST_TAG" ]]; then
+              echo "- Compare: ${REPO}/compare/${LAST_TAG}...${SHA}" >> RELEASE_BODY.md
+            fi
+          fi
+
+          echo "body_path=RELEASE_BODY.md" >> "$GITHUB_OUTPUT"
+          echo "---- RELEASE_BODY.md ----"
+          cat RELEASE_BODY.md
+
+      # ✅ 创建（或更新）Release：tag→正式发布并生成官方notes；branch→预发布且不设 latest
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release_name.outputs.tag_name }}
-          name: ${{ steps.release_name.outputs.tag_name }}
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.tag_name }}
+          body_path: ${{ steps.body.outputs.body_path }}
           draft: false
-          prerelease: ${{ steps.release_name.outputs.prerelease }}
-          make_latest: true
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          make_latest: ${{ steps.meta.outputs.make_latest }}
+          # 只有正式 tag 才启用自动 release notes（PR/commit 汇总）
+          generate_release_notes: ${{ steps.meta.outputs.prerelease == 'false' }}
           append_body: false
           files: ${{ steps.collect_unique.outputs.asset_dir }}/*.whl
