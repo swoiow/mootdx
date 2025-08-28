@@ -104,22 +104,42 @@ jobs:
     name: Create GitHub Release
     needs: build-wheel
     runs-on: ubuntu-latest
-    # This job will run if a tag is pushed OR if develop branch is pushed
-    # The logic inside determines if it's a formal or pre-release.
-    if: github.event_name == 'push' # Only run on push events (tags or branches)
+    if: github.event_name == 'push'
 
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: collected-artifacts
+        # Add an 'if' condition to only proceed if artifacts were actually downloaded
+        # This is a workaround as download-artifact doesn't have a direct 'success' output for empty downloads
+        # We'll check for the directory's existence in the next step.
+
+      - name: Check if artifacts were downloaded and prepare for release
+        id: prepare_release
+        shell: bash
+        run: |
+          # Check if the 'collected-artifacts' directory exists and is not empty
+          if [ -d "collected-artifacts" ] && [ -n "$(ls -A collected-artifacts)" ]; then
+            echo "Artifacts downloaded successfully."
+            echo "proceed_with_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No artifacts were downloaded or 'collected-artifacts' directory is empty. Skipping release creation."
+            echo "proceed_with_release=false" >> "$GITHUB_OUTPUT"
+            # Optionally, you could fail the job here if a release MUST have artifacts
+            # exit 1
+          fi
 
       - name: Checkout repository (full history)
+        # Only checkout if we are proceeding with the release
+        if: steps.prepare_release.outputs.proceed_with_release == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Compute release meta
+        # Only compute meta if we are proceeding with the release
+        if: steps.prepare_release.outputs.proceed_with_release == 'true'
         id: meta
         shell: bash
         run: |
@@ -144,12 +164,16 @@ jobs:
           echo "ref_kind=$REF_KIND" >> "$GITHUB_OUTPUT"
 
       - name: List collected artifacts
+        # Only list if we are proceeding with the release
+        if: steps.prepare_release.outputs.proceed_with_release == 'true'
         run: |
           echo "--- Collected Artifacts ---"
           ls -R collected-artifacts || echo "No artifacts collected."
           echo "---------------------------"
 
       - name: Collect unique wheels for release
+        # Only collect if we are proceeding with the release
+        if: steps.prepare_release.outputs.proceed_with_release == 'true'
         id: collect_unique
         shell: bash
         run: |
@@ -167,6 +191,8 @@ jobs:
           echo "----------------------"
 
       - name: Build release body
+        # Only build body if we are proceeding with the release
+        if: steps.prepare_release.outputs.proceed_with_release == 'true'
         id: body
         shell: bash
         run: |
@@ -213,6 +239,8 @@ jobs:
           echo "-----------------------------------"
 
       - name: Create GitHub Release
+        # Only create release if we are proceeding and all previous steps were successful
+        if: steps.prepare_release.outputs.proceed_with_release == 'true' && steps.body.outcome == 'success'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag_name }}
@@ -221,6 +249,6 @@ jobs:
           draft: false
           prerelease: ${{ steps.meta.outputs.prerelease }}
           make_latest: ${{ steps.meta.outputs.make_latest }}
-          generate_release_notes: ${{ steps.meta.outputs.prerelease == 'false' }} # Only generate notes for formal releases (tags)
+          generate_release_notes: ${{ steps.meta.outputs.prerelease == 'false' }}
           append_body: false
           files: release-assets/*.whl
