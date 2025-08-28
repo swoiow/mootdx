@@ -84,7 +84,6 @@ jobs:
           name: mootdx-${{ matrix.python-version }}-${{ matrix.os }}
           path: ${{ steps.find_whl.outputs.wheel_path }}
 
-
   release:
     needs: build-wheel
     runs-on: ubuntu-latest
@@ -95,8 +94,36 @@ jobs:
         with:
           path: dist
 
-      - name: List wheels
-        run: ls -R dist
+      - name: Collect unique wheels and build release body
+        id: body
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          declare -A seen
+
+          echo "## Release ${{ github.ref_name }}" > RELEASE_BODY.md
+          echo "" >> RELEASE_BODY.md
+          echo "### Artifacts & Checksums" >> RELEASE_BODY.md
+          echo "" >> RELEASE_BODY.md
+
+          while IFS= read -r -d '' f; do
+            sha=$(sha256sum "$f" | awk '{print $1}')
+            bn=$(basename "$f")
+            if [[ -z "${seen[$sha]+x}" ]]; then
+              cp -f "$f" "release-assets/$bn"
+              seen[$sha]=1
+              echo "- \`$bn\`  \`$sha\`" >> RELEASE_BODY.md
+            else
+              echo "Duplicate skipped: $bn ($sha)"
+            fi
+          done < <(find dist -type f -name '*.whl' -print0 | sort -z)
+
+          echo "body_path=RELEASE_BODY.md" >> "$GITHUB_OUTPUT"
+
+          echo "---- RELEASE BODY ----"
+          cat RELEASE_BODY.md
+          echo "----------------------"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -105,4 +132,5 @@ jobs:
           name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
-          files: dist/**/*.whl
+          body_path: ${{ steps.body.outputs.body_path }}
+          files: release-assets/*.whl
