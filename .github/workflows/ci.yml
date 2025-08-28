@@ -1,54 +1,93 @@
 name: Build and Release Wheels
-
 on:
   push:
-    branches: [ develop ]
-    tags: [ "v*.*.*" ]
-  workflow_dispatch:
-
+    tags:
+      - "v*.*.*" # Trigger for official releases when a tag is pushed
+    branches:
+      - develop  # Trigger for pre-releases when develop branch is pushed
+  workflow_dispatch: # Allow manual triggering
+concurrency:
+  group: build-wheel-${{ github.ref }} # Ensure concurrency is per-branch/tag
+  cancel-in-progress: true
 permissions:
-  contents: write
-
+  contents: write # Needed for creating GitHub Releases
 jobs:
   build-wheel:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-
+        os: [ ubuntu-latest, windows-latest ]
+        python-version: [ "3.10", "3.11", "3.12", "3.13" ]
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up Python
+      - name: Build wheel (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          docker build \
+            --build-arg PYTHON_VERSION=${{ matrix.python-version }} \
+            -t mootdx-builder-${{ matrix.python-version }} \
+            -f ${{ github.workspace }}/.github/docker/Dockerfile .
+          mkdir -p dist dist_temp
+          CONTAINER_ID=$(docker create mootdx-builder-${{ matrix.python-version }})
+          docker cp "$CONTAINER_ID:/app/dist/." dist_temp/ || echo "No wheels found in container /app/dist/"
+          docker rm "$CONTAINER_ID"
+          if [ -n "$(ls -A dist_temp)" ]; then
+            mv dist_temp/* dist/
+          else
+            echo "No wheels were copied from the container."
+          fi
+          ls -alh dist/ || echo "dist directory is empty or not found."
+      - name: Set up Python (Windows only)
+        if: matrix.os == 'windows-latest'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-
-      - name: Install build deps
+      - name: Install build dependencies (Windows only)
+        if: matrix.os == 'windows-latest'
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          if [ -f requirements.txt ]; then
+          python -m pip install --upgrade pip build wheel setuptools
+          if (Test-Path requirements.txt) {
             pip install -r requirements.txt
-          fi
-
-      - name: Build wheel
+          }
+      - name: Build wheel (Windows only)
+        if: matrix.os == 'windows-latest'
         run: |
-          python setup.py bdist_wheel
-          ls -alh dist
-
+          if (Test-Path setup.py) {
+            python setup.py bdist_wheel
+          } elseif (Test-Path pyproject.toml) {
+            python -m build --wheel
+          } else {
+            echo "No setup.py or pyproject.toml found. Cannot build wheel."
+            exit 1
+          }
+      - name: Identify built wheel
+        shell: bash
+        id: find_whl
+        run: |
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            WHEEL_PATH=$(find dist -name "*.whl" -print -quit)
+          else # windows-latest
+            WHEEL_PATH=$(powershell -Command "Get-ChildItem -Path dist -Filter '*.whl' | Select-Object -First 1 | ForEach-Object { $_.FullName }")
+          fi
+          if [ -z "$WHEEL_PATH" ]; then
+            echo "No wheel file found in dist directory."
+            echo "wheel_path=" >> "$GITHUB_OUTPUT"
+          else
+            echo "wheel_path=$WHEEL_PATH" >> "$GITHUB_OUTPUT"
+          fi
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
+        if: steps.find_whl.outputs.wheel_path != ''
         with:
-          name: wheel-${{ matrix.os }}-${{ matrix.python-version }}
-          path: dist/*.whl
+          name: mootdx-${{ matrix.python-version }}-${{ matrix.os }}
+          path: ${{ steps.find_whl.outputs.wheel_path }}
+
 
   release:
     needs: build-wheel
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
 
     steps:
       - name: Download artifacts
@@ -56,11 +95,14 @@ jobs:
         with:
           path: dist
 
+      - name: List wheels
+        run: ls -R dist
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           draft: false
-          prerelease: ${{ github.ref_type != 'tag' }}
+          prerelease: false
           files: dist/**/*.whl
