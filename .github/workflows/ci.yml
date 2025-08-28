@@ -1,32 +1,34 @@
-name: Build Wheels
+name: Build and Release Wheels
 
 on:
   push:
     tags:
-      - "v*.*.*"
-    branches: [ develop ]
+      - "v*.*.*" # Trigger for official releases when a tag is pushed
+    branches:
+      - develop  # Trigger for pre-releases when develop branch is pushed
+
+  workflow_dispatch: # Allow manual triggering
 
 concurrency:
-  group: build-wheel
+  group: build-wheel-${{ github.ref }} # Ensure concurrency is per-branch/tag
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: write # Needed for creating GitHub Releases
 
 jobs:
   build-wheel:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest, windows-latest ]
-        python-version: [ "3.10", "3.11", "3.12", "3.13" ]
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ✅ Linux: Docker 构建
-      - name: Build wheel with Docker (Linux only)
+      - name: Build wheel (Linux only)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
@@ -38,37 +40,62 @@ jobs:
           mkdir -p dist dist_temp
 
           CONTAINER_ID=$(docker create mootdx-builder-${{ matrix.python-version }})
-          docker cp "$CONTAINER_ID:/app/dist/." dist_temp/ || echo "Nothing to copy"
+          docker cp "$CONTAINER_ID:/app/dist/." dist_temp/ || echo "No wheels found in container /app/dist/"
           docker rm "$CONTAINER_ID"
 
-          mv dist_temp/* dist/ 2>/dev/null || echo "No wheel files moved"
-          ls -alh dist/ || echo "dist directory not found"
+          if [ -n "$(ls -A dist_temp)" ]; then
+            mv dist_temp/* dist/
+          else
+            echo "No wheels were copied from the container."
+          fi
+          ls -alh dist/ || echo "dist directory is empty or not found."
 
-      # ✅ Windows: 原生构建
       - name: Set up Python (Windows only)
         if: matrix.os == 'windows-latest'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install build dependencies (Windows only)
+        if: matrix.os == 'windows-latest'
+        run: |
+          python -m pip install --upgrade pip build wheel setuptools
+          if (Test-Path requirements.txt) {
+            pip install -r requirements.txt
+          }
+
       - name: Build wheel (Windows only)
         if: matrix.os == 'windows-latest'
         run: |
-          pip install --upgrade pip build wheel setuptools
-          pip install -r requirements.txt
-          python setup.py bdist_wheel
+          if (Test-Path setup.py) {
+            python setup.py bdist_wheel
+          } elseif (Test-Path pyproject.toml) {
+            python -m build --wheel
+          } else {
+            echo "No setup.py or pyproject.toml found. Cannot build wheel."
+            exit 1
+          }
 
-      # ✅ 提取构建产物路径
       - name: Identify built wheel
         shell: bash
         id: find_whl
         run: |
-          WHEEL_PATH=$(find dist -name "*.whl" | head -n 1)
-          echo "wheel_path=$WHEEL_PATH" >> "$GITHUB_OUTPUT"
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            WHEEL_PATH=$(find dist -name "*.whl" -print -quit)
+          else # windows-latest
+            WHEEL_PATH=$(powershell -Command "Get-ChildItem -Path dist -Filter '*.whl' | Select-Object -First 1 | ForEach-Object { $_.FullName }")
+          fi
 
-      # ✅ 上传 artifact（无需重命名）
+          if [ -z "$WHEEL_PATH" ]; then
+            echo "No wheel file found in dist directory."
+            echo "wheel_path=" >> "$GITHUB_OUTPUT"
+          else
+            echo "wheel_path=$WHEEL_PATH" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
+        if: steps.find_whl.outputs.wheel_path != ''
         with:
           name: mootdx-${{ matrix.python-version }}-${{ matrix.os }}
           path: ${{ steps.find_whl.outputs.wheel_path }}
@@ -77,6 +104,9 @@ jobs:
     name: Create GitHub Release
     needs: build-wheel
     runs-on: ubuntu-latest
+    # This job will run if a tag is pushed OR if develop branch is pushed
+    # The logic inside determines if it's a formal or pre-release.
+    if: github.event_name == 'push' # Only run on push events (tags or branches)
 
     steps:
       - name: Download all artifacts
@@ -84,13 +114,11 @@ jobs:
         with:
           path: collected-artifacts
 
-      # 需要 git 历史来生成比较链接/生成 release notes
-      - name: Checkout (full history)
+      - name: Checkout repository (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ✅ 生成 tag/name + 预发布标记（tag→正式；branch→预发布）
       - name: Compute release meta
         id: meta
         shell: bash
@@ -103,11 +131,11 @@ jobs:
             REF_KIND="tag"
           else
             BRANCH_NAME="${GITHUB_REF#refs/heads/}"
-            TS=$(date -u +%Y%m%d-%H%MZ)   # 使用UTC，避免时区混淆
+            TS=$(date -u +%Y%m%d-%H%MZ)
             SHORT_SHA=$(git rev-parse --short=8 HEAD)
             TAG_NAME="${BRANCH_NAME}-${TS}-${SHORT_SHA}"
             PRERELEASE="true"
-            MAKE_LATEST="false"           # 预发布不设为latest，避免污染最新稳定版本
+            MAKE_LATEST="false"
             REF_KIND="branch"
           fi
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
@@ -116,28 +144,28 @@ jobs:
           echo "ref_kind=$REF_KIND" >> "$GITHUB_OUTPUT"
 
       - name: List collected artifacts
-        run: ls -R collected-artifacts || true
+        run: |
+          echo "--- Collected Artifacts ---"
+          ls -R collected-artifacts || echo "No artifacts collected."
+          echo "---------------------------"
 
-      # ✅ 去重：只保留“按文件名唯一”的一份 wheel 作为发布资产
-      - name: Collect unique wheels
+      - name: Collect unique wheels for release
         id: collect_unique
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          while IFS= read -r -d '' f; do
+          find collected-artifacts -type f -name "*.whl" -print0 | while IFS= read -r -d '' f; do
             base="$(basename "$f")"
             if [[ ! -e "release-assets/$base" ]]; then
               cp -f "$f" "release-assets/$base"
-              echo "kept: $base"
-            else
-              echo "dup : $base (skipped)"
             fi
-          done < <(find collected-artifacts -type f -name "*.whl" -print0)
+          done
           echo "asset_dir=release-assets" >> "$GITHUB_OUTPUT"
-          ls -alh release-assets
+          echo "--- Release Assets ---"
+          ls -alh release-assets || echo "No release assets found."
+          echo "----------------------"
 
-      # ✅ 生成 Release Body（自动列出 wheels、分支/commit、对比链接等）
       - name: Build release body
         id: body
         shell: bash
@@ -145,44 +173,45 @@ jobs:
           set -euo pipefail
           REPO="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           SHA="${GITHUB_SHA}"
-          echo "## Artifacts" > RELEASE_BODY.md
-          if ls ${{ steps.collect_unique.outputs.asset_dir }}/*.whl >/dev/null 2>&1; then
+          TAG="${{ steps.meta.outputs.tag_name }}"
+
+          echo "## Release: $TAG" > RELEASE_BODY.md
+          echo "" >> RELEASE_BODY.md
+
+          echo "### Artifacts" >> RELEASE_BODY.md
+          if ls release-assets/*.whl >/dev/null 2>&1; then
             echo "" >> RELEASE_BODY.md
-            for f in ${{ steps.collect_unique.outputs.asset_dir }}/*.whl; do
+            for f in release-assets/*.whl; do
               bn=$(basename "$f")
               echo "- \`$bn\`" >> RELEASE_BODY.md
             done
           else
             echo "" >> RELEASE_BODY.md
-            echo "_No wheels found._" >> RELEASE_BODY.md
+            echo "_No wheels found for this release._" >> RELEASE_BODY.md
           fi
 
           echo "" >> RELEASE_BODY.md
-          echo "## Source" >> RELEASE_BODY.md
+          echo "### Source" >> RELEASE_BODY.md
           if [[ "${{ steps.meta.outputs.ref_kind }}" == "tag" ]]; then
-            # 正式发布：让 action 生成官方 release notes（下个步骤开启 generate_release_notes）
-            LAST_TAG="$(git describe --tags --abbrev=0 --always || true)"
-            echo "- Ref: tag \`${{ steps.meta.outputs.tag_name }}\`" >> RELEASE_BODY.md
-            echo "- Commit: [$SHA](${REPO}/commit/${SHA})" >> RELEASE_BODY.md
-            if [[ -n "$LAST_TAG" && "$LAST_TAG" != "${{ steps.meta.outputs.tag_name }}" ]]; then
-              echo "- Compare: ${REPO}/compare/${LAST_TAG}...${{ steps.meta.outputs.tag_name }}" >> RELEASE_BODY.md
+            echo "- Tag: \`$TAG\` ([${SHA:0:8}](${REPO}/commit/${SHA}))" >> RELEASE_BODY.md
+            LAST_TAG=$(git describe --tags --abbrev=0 --always || echo "HEAD")
+            if [[ "$LAST_TAG" != "HEAD" && "$LAST_TAG" != "$TAG" ]]; then
+              echo "- Compare: [${LAST_TAG}...$TAG](${REPO}/compare/${LAST_TAG}...${TAG})" >> RELEASE_BODY.md
             fi
           else
-            # 预发布：带上分支名/commit/与最近tag的对比链接
             BRANCH="${GITHUB_REF#refs/heads/}"
-            LAST_TAG="$(git describe --tags --abbrev=0 --always || true)"
-            echo "- Ref: branch \`${BRANCH}\`" >> RELEASE_BODY.md
-            echo "- Commit: [$SHA](${REPO}/commit/${SHA})" >> RELEASE_BODY.md
-            if [[ -n "$LAST_TAG" ]]; then
-              echo "- Compare: ${REPO}/compare/${LAST_TAG}...${SHA}" >> RELEASE_BODY.md
+            echo "- Branch: \`${BRANCH}\` ([${SHA:0:8}](${REPO}/commit/${SHA}))" >> RELEASE_BODY.md
+            LAST_TAG=$(git describe --tags --abbrev=0 --always || echo "HEAD")
+            if [[ "$LAST_TAG" != "HEAD" ]]; then
+              echo "- Compare: [${LAST_TAG}...${SHA:0:8}](${REPO}/compare/${LAST_TAG}...${SHA})" >> RELEASE_BODY.md
             fi
           fi
 
           echo "body_path=RELEASE_BODY.md" >> "$GITHUB_OUTPUT"
-          echo "---- RELEASE_BODY.md ----"
+          echo "---- Generated RELEASE_BODY.md ----"
           cat RELEASE_BODY.md
+          echo "-----------------------------------"
 
-      # ✅ 创建（或更新）Release：tag→正式发布并生成官方notes；branch→预发布且不设 latest
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -192,7 +221,6 @@ jobs:
           draft: false
           prerelease: ${{ steps.meta.outputs.prerelease }}
           make_latest: ${{ steps.meta.outputs.make_latest }}
-          # 只有正式 tag 才启用自动 release notes（PR/commit 汇总）
-          generate_release_notes: ${{ steps.meta.outputs.prerelease == 'false' }}
+          generate_release_notes: ${{ steps.meta.outputs.prerelease == 'false' }} # Only generate notes for formal releases (tags)
           append_body: false
-          files: ${{ steps.collect_unique.outputs.asset_dir }}/*.whl
+          files: release-assets/*.whl
